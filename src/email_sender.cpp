@@ -1,325 +1,188 @@
 #include "email_sender.h"
-#include <string.h>
-#include <fstream>
- 
-EmailSender::EmailSender() 
-{
-    m_strUser = "";
-    m_strPsw = "";
-    m_strSmtpServer = "";
-    m_iPort = -1;
-    m_RecipientList.clear();
-    m_strMailFrom = "";
-    m_MailContent.clear();
-    m_iMailContentPos = 0;
-}
- 
-EmailSender::EmailSender(  //create sendmail object with paremeter;
-                const std::string & strUser,
-                const std::string & strPsw, 
-                const std::string & strSmtpServer, 
-                int iPort, 
-                const std::string & strMailFrom
-            )
-{
-    m_strUser = strUser;
-    m_strPsw = strPsw;
-    m_strSmtpServer = strSmtpServer;
-    m_iPort = iPort;
-    m_RecipientList.clear();
-    m_CcRecipientList.clear();
-    m_strMailFrom = strMailFrom;
-    m_MailContent.clear();
-    m_iMailContentPos = 0;
-}
- 
-EmailSender::EmailSender(const EmailSender& orig) {
-}
- 
-EmailSender::~EmailSender() {
-}
- 
-size_t EmailSender::read_callback(void* ptr, size_t size, size_t nmemb, void* userp)
-{
-    EmailSender * pSm = (EmailSender *)userp;
- 
-    if(size*nmemb < 1)
-        return 0;
-    if(pSm->m_iMailContentPos < pSm->m_MailContent.size())
-    {
-        size_t len;
-        len = pSm->m_MailContent[pSm->m_iMailContentPos].length();
- 
-        memcpy(ptr, pSm->m_MailContent[pSm->m_iMailContentPos].c_str(), pSm->m_MailContent[pSm->m_iMailContentPos].length());
-        pSm->m_iMailContentPos++; /* advance pointer */
-        return len;
-    }
-    return 0;
-}
- 
-struct timeval EmailSender::tvnow()
-{
-  /*
-  ** time() returns the value of time in seconds since the Epoch.
-  */ 
-    struct timeval now;
-    now.tv_sec = (long)time(NULL);
-    now.tv_usec = 0;
-    return now;
-}
- 
-long EmailSender::tvdiff(timeval newer, timeval older)
-{
-    return (newer.tv_sec-older.tv_sec)*1000+
-        (newer.tv_usec-older.tv_usec)/1000;
-}
- 
-bool EmailSender::ConstructHead(const std::string & strSubject, const std::string & strContent)
-{
-    m_MailContent.push_back("MIME-Versioin: 1.0\n");
 
-    std::string strTemp = "To: ";
-    for(std::vector<std::string >::iterator it = m_RecipientList.begin(); it != m_RecipientList.end();)
-    {
-        strTemp += *it;
-        it++;
-        if(it != m_RecipientList.end())
-                strTemp += ",";
-    }
-    strTemp += "\n";
-    
-    strTemp += "Cc: ";
-    for(std::vector<std::string >::iterator it = m_CcRecipientList.begin(); it != m_CcRecipientList.end();)
-    {
-        strTemp += *it;
-        it++;
-        if(it != m_CcRecipientList.end())
-            strTemp += ",";
-    }
-    strTemp += "\n";
-
-    m_MailContent.push_back(strTemp);
-    if(strSubject != "")
-    {
-        strTemp = "Subject: ";
-        strTemp += strSubject;
-        strTemp += "\n";
-        m_MailContent.push_back(strTemp);
-    }
-    m_MailContent.push_back("Content-Transfer-Encoding: 8bit\n");
-    m_MailContent.push_back("Content-Type: text/html; \n Charset=\"UTF-8\"\n\n");
-    if(strContent != "")
-    {
-        m_MailContent.push_back(strContent);
-    }
-
-    // TODO: join attachments here, read from files
-    
-    return true;
-}
- 
-bool EmailSender::SendMail(const std::string& strSubject, const std::string& strMailBody) 
+EmailSender::EmailSender(const std::string& smtp_server,
+                         const int smtp_port,
+                         const std::string& from_email,
+                         const std::string& password,
+                         const std::string& from_name)
 {
-    m_MailContent.clear();
-    m_iMailContentPos = 0;
-    ConstructHead(strSubject, strMailBody);
-    bool bRet = true;
+    // init settings
+    m_smtp_url = "smtp://" + smtp_server + ':' + std::to_string(smtp_port); // smtp://example.com
+    m_from = std::make_pair(from_email, from_name);
+    m_password = password;
+}
+
+EmailSender::~EmailSender()
+{
+    m_recvs.clear();
+    m_ccs.clear();
+    m_attachments.clear();
+}
+
+void EmailSender::setEmailContent(const std::string& subject,
+                                  const std::string& body)
+{
+    // set email title and body content
+    m_email_subject = subject;
+    m_email_body = body;
+}
+
+void EmailSender::addRecvEmailAddr(const std::string& email_addr, const std::string &name)
+{
+    // add receiver to list
+    m_recvs.push_back(std::make_pair(email_addr, name));
+}
+
+void EmailSender::addCcEmailAddr(const std::string& email_addr, const std::string &name)
+{
+    // add cc to list
+    m_ccs.push_back(std::make_pair(email_addr, name));
+}
+
+void EmailSender::addAttachment(const std::string& filename)
+{
+    // add attach filename to list
+    m_attachments.push_back(filename); // NOTICE: can be absolute or relative file path
+}
+
+void EmailSender::send()
+{
+    // here init curl and do smtp email send
     CURL *curl;
-    CURLM *mcurl;
-    int still_running = 1;
-    struct timeval mp_start;
-    char mp_timedout = 0;
-    struct curl_slist* rcpt_list = NULL;
- 
-    curl_global_init(CURL_GLOBAL_DEFAULT);
- 
+    CURLcode res = CURLE_OK;
+
     curl = curl_easy_init();
-    if (!curl)
+    if(curl)
     {
-        printf("Init curl failed!\n");
-        return false;
-    }
- 
-    mcurl = curl_multi_init();
-    if (!mcurl)
-    {
-        printf("Init mcurl failed!\n");
-        return false;
-    }
-    for(std::vector<std::string >::iterator it = m_RecipientList.begin(); it != m_RecipientList.end();it++)
-    {
-        rcpt_list = curl_slist_append(rcpt_list, it->c_str());
-    }
-    
-    if(m_strSmtpServer == "" || m_iPort <= 0)
-    {
-        printf("smtp server couldn't be empty, or port must be large than 0!\n");
-        
-        curl_slist_free_all(rcpt_list);
-        curl_multi_cleanup(mcurl);
+        struct curl_slist *headers = NULL;
+        struct curl_slist *recipients = NULL;
+        struct curl_slist *slist = NULL;
+        curl_mime *mime;
+        curl_mime *alt;
+        curl_mimepart *part;
+
+        /* This is the URL for your mailserver */
+        curl_easy_setopt(curl, CURLOPT_URL, m_smtp_url.c_str());
+
+        /* Login smtp server to verify */
+        curl_easy_setopt(curl, CURLOPT_USERNAME, m_from.first.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, m_password.c_str());
+
+        /* Note that this option isn't strictly required, omitting it will result
+       * in libcurl sending the MAIL FROM command with empty sender data. All
+       * autoresponses should have an empty reverse-path, and should be directed
+       * to the address in the reverse-path which triggered them. Otherwise,
+       * they could cause an endless loop. See RFC 5321 Section 4.5.5 for more
+       * details.
+       */
+        std::string from_email_addr = '<' + m_from.first + '>'; // should be like <example@126.com>
+        curl_easy_setopt(curl, CURLOPT_MAIL_FROM, from_email_addr.c_str());
+
+        /* Add recipients, in this particular case they correspond to the
+       * To: and Cc: addressees in the header, but they could be any kind of
+       * recipient. */
+        // receiver
+        for (auto &email_pair : m_recvs)
+        {
+            std::string email_addr = '<' + email_pair.first + '>';
+            recipients = curl_slist_append(recipients, email_addr.c_str());
+        }
+        // cc
+        for (auto &email_pair : m_ccs)
+        {
+            std::string email_addr = '<' + email_pair.first + '>';
+            recipients = curl_slist_append(recipients, email_addr.c_str());
+        }
+        curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
+
+        /* Build and set the message header list. */
+        std::string header;
+
+        header += "From:";
+        header += m_from.second + '<' + m_from.first + '>' + "\n";
+
+        header += "To:";
+        for (int i = 0; i < m_recvs.size(); i++)
+        {
+            header += m_recvs[i].second += '<' + m_recvs[i].first + '>';
+            if (i != m_recvs.size() - 1)
+                header += ',';
+        }
+        header += "\n";
+
+        header += "Cc:";
+        for (int i = 0; i < m_ccs.size(); i++)
+        {
+            header += m_ccs[i].second += '<' + m_ccs[i].first + '>';
+            if (i != m_ccs.size() - 1)
+                header += ',';
+        }
+        header += "\n";
+
+        header += "Subject:";
+        header += m_email_subject + "\n";
+
+//        printf("email header:\n");
+//        printf(header.c_str());
+
+        headers = curl_slist_append(headers, header.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        /* Build the mime message. */
+        mime = curl_mime_init(curl);
+
+        /* The inline part is an alternative proposing the html and the text
+         versions of the e-mail. */
+        alt = curl_mime_init(curl);
+
+        /* HTML message. */
+        part = curl_mime_addpart(alt);
+        curl_mime_data(part, m_email_body.c_str(), CURL_ZERO_TERMINATED);
+        curl_mime_type(part, "text/html");
+
+        /* Text message. */
+        //    part = curl_mime_addpart(alt);
+        //    curl_mime_data(part, m_email_body.c_str(),, CURL_ZERO_TERMINATED);
+
+        /* Create the inline part. */
+        part = curl_mime_addpart(mime);
+        curl_mime_subparts(part, alt);
+        curl_mime_type(part, "multipart/alternative");
+        slist = curl_slist_append(NULL, "Content-Disposition: inline");
+        curl_mime_headers(part, slist, 1);
+
+        /* Add the attachments */
+        for (std::string &filename : m_attachments)
+        {
+            part = curl_mime_addpart(mime);
+            curl_mime_filedata(part, filename.c_str());
+            curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+        }
+
+        /* Send the message */
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1); // 1 means open info print, 0 not
+        res = curl_easy_perform(curl);
+
+        /* Check for errors */
+        if(res != CURLE_OK)
+            fprintf(stderr, "curl_easy_perform() failed: %s\n",
+                    curl_easy_strerror(res));
+
+        /* Free lists. */
+        curl_slist_free_all(recipients);
+        curl_slist_free_all(headers);
+
+        /* curl won't send the QUIT command until you call cleanup, so you should
+       * be able to re-use this connection for additional messages (setting
+       * CURLOPT_MAIL_FROM and CURLOPT_MAIL_RCPT as required, and calling
+       * curl_easy_perform() again. It may not be a good idea to keep the
+       * connection open for a very long time though (more than a few minutes
+       * may result in the server timing out the connection), and you do want to
+       * clean up in the end.
+       */
         curl_easy_cleanup(curl);
-        curl_global_cleanup();
-        return false;
+
+        /* Free multipart message. */
+        curl_mime_free(mime);
     }
-    std::string strUrl = "smtp://" + m_strSmtpServer;
-    strUrl += ":";
-    char cPort[10];
-    memset(cPort, 0, 10);
-    sprintf(cPort, "%d", m_iPort);
-    strUrl += cPort;
-    curl_easy_setopt(curl, CURLOPT_URL, strUrl.c_str());
-    
-    if(m_strUser != "")
-    {
-        curl_easy_setopt(curl, CURLOPT_USERNAME, m_strUser.c_str());
-    }
-    if(m_strPsw != "")
-    {
-        curl_easy_setopt(curl, CURLOPT_PASSWORD, m_strPsw.c_str());
-    }
-    
-    curl_easy_setopt(curl, CURLOPT_READFUNCTION, &EmailSender::read_callback);
-    
-    if(m_strMailFrom == "")
-    {
-        printf("Mail from address couldn't be empty!\n");
-        
-        curl_slist_free_all(rcpt_list);
-        curl_multi_cleanup(mcurl);
-        curl_easy_cleanup(curl);
-        curl_global_cleanup();
-        return false;
-    }
-    curl_easy_setopt(curl, CURLOPT_MAIL_FROM, m_strMailFrom.c_str());
-    curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, rcpt_list);
-    curl_easy_setopt(curl, CURLOPT_USE_SSL, (long) CURLUSESSL_ALL);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_READDATA, this);
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSLVERSION, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_SESSIONID_CACHE, 0L);
-    curl_multi_add_handle(mcurl, curl);
- 
-    mp_timedout = 0;
-    mp_start = tvnow();
- 
-    /* we start some action by calling perform right away */
-    curl_multi_perform(mcurl, &still_running);
- 
-    while (still_running) {
-        struct timeval timeout;
-        int rc; /* select() return code */
- 
-        fd_set fdread;
-        fd_set fdwrite;
-        fd_set fdexcep;
-        int maxfd = -1;
- 
-        long curl_timeo = -1;
- 
-        FD_ZERO(&fdread);
-        FD_ZERO(&fdwrite);
-        FD_ZERO(&fdexcep);
- 
-        /* set a suitable timeout to play around with */
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
- 
-        curl_multi_timeout(mcurl, &curl_timeo);
-        if (curl_timeo >= 0) {
-            timeout.tv_sec = curl_timeo / 1000;
-            if (timeout.tv_sec > 1)
-                timeout.tv_sec = 1;
-            else
-                timeout.tv_usec = (curl_timeo % 1000) * 1000;
-        }
- 
-        /* get file descriptors from the transfers */
-        curl_multi_fdset(mcurl, &fdread, &fdwrite, &fdexcep, &maxfd);
- 
-        /* In a real-world program you OF COURSE check the return code of the
-           function calls.  On success, the value of maxfd is guaranteed to be
-           greater or equal than -1.  We call select(maxfd + 1, ...), specially in
-           case of (maxfd == -1), we call select(0, ...), which is basically equal
-           to sleep. */
- 
-        rc = select(maxfd + 1, &fdread, &fdwrite, &fdexcep, &timeout);
- 
-        if (tvdiff(tvnow(), mp_start) > MULTI_PERFORM_HANG_TIMEOUT) {
-            fprintf(stderr, "ABORTING TEST, since it seems "
-                    "that it would have run forever.\n");
-            bRet = false;
-            break;
-        }
- 
-        switch (rc) {
-            case -1:
-                /* select error */
-                printf("select error\n");
-                bRet = false;
-                break;
-            case 0: /* timeout */
-                printf("time out, retry again!\n");
-                curl_multi_perform(mcurl, &still_running);
-                break;
-            default: /* action */
-                curl_multi_perform(mcurl, &still_running);
-                break;
-        }
-    }
- 
-    curl_multi_remove_handle(mcurl, curl);
-    curl_slist_free_all(rcpt_list);
-    curl_multi_cleanup(mcurl);
-    curl_easy_cleanup(curl);
-    curl_global_cleanup();
-    return bRet;
 }
- 
-bool EmailSender::SendMail(const std::string & strSubject, const char* pMailBody, int len)
-{
-    std::string strMailContent;
-    strMailContent.append(pMailBody, len);
-    
-    return SendMail(strSubject, strMailContent);
-}
- 
-bool EmailSender::SendMail(const std::string& strUser, const std::string& strPsw, const std::string& strSmtpServer, int iPort, std::vector<std::string>& recipientList, const std::string& strMailFrom, const std::string& strSubject, const std::string& strMailBody)
-{
-    m_strUser = strUser;
-    m_strPsw = strPsw;
-    m_strSmtpServer = strSmtpServer;
-    m_iPort = iPort;
-    std::copy(recipientList.begin(), recipientList.end(), m_RecipientList.begin());
-    m_strMailFrom = strMailFrom;
-    
-    return SendMail(strSubject, strMailBody);
-    
-}
- 
-bool EmailSender::SendMail(const std::string& strUser, const std::string& strPsw, const std::string& strSmtpServer, int iPort, std::vector<std::string>& recipientList, const std::string& strMailFrom, const std::string& strSubject, const char* pMailBody, int len)
-{
-    std::string strMailContent;
-    strMailContent.append(pMailBody, len);
-    return SendMail(strUser, strPsw, strSmtpServer, iPort, recipientList, strMailFrom, strSubject, strMailContent);
-}
- 
-bool EmailSender::SendMail(const std::string& strUser, const std::string& strPsw, const std::string& strSmtpServer, int iPort, const std::string& strMailTo, const std::string& strMailFrom, const std::string& strSubject, const std::string& strMailBody)
-{
-    std::vector<std::string> recipientList;
-    recipientList.push_back(strMailTo);
-    
-    return SendMail(strUser, strPsw, strSmtpServer, iPort, recipientList, strMailFrom, strSubject, strMailBody);
-}
- 
-bool EmailSender::SendMail(const std::string& strUser, const std::string& strPsw, const std::string& strSmtpServer, int iPort, const std::string& strMailTo, const std::string& strMailFrom, const std::string& strSubject, const char* pMailBody, int len)
-{
-    std::string strMailContent;
-    strMailContent.append(pMailBody, len);
-    return SendMail(strUser, strPsw, strSmtpServer, iPort, strMailTo, strMailFrom, strSubject, strMailContent);
- 
-}
- 
- 
- 

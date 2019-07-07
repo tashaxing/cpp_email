@@ -1,4 +1,4 @@
-project(cpp_test)
+project(cpp_email)
 cmake_minimum_required(VERSION 2.8)
 
 add_definitions(-std=c++11)
@@ -12,8 +12,6 @@ link_directories(
 )
 
 set(SRC 
-	src/base64.h
-	src/base64.cpp
 	src/email_sender.h
 	src/email_sender.cpp
 	src/main.cpp
